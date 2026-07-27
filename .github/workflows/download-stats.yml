@@ -1,0 +1,51 @@
+name: Release download stats
+
+# GitHub exposes only a cumulative download_count per release asset, with no
+# history. Snapshotting it once a day and diffing consecutive snapshots is the
+# only way to get a day-wise trend, so this must run from the day it lands --
+# earlier days cannot be backfilled.
+
+on:
+  schedule:
+    - cron: '0 2 * * *' # 02:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: download-stats
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Fetch release asset download counts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
+            --jq '.[] | .tag_name as $tag | .assets[] | [$tag, .name, .download_count] | @tsv' \
+            > "${RUNNER_TEMP}/snapshot.tsv"
+          echo "Fetched $(wc -l < "${RUNNER_TEMP}/snapshot.tsv") asset rows"
+
+      - name: Append snapshot to history
+        run: python3 scripts/append_snapshot.py "${RUNNER_TEMP}/snapshot.tsv" stats/download-stats.csv
+
+      - name: Commit history
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain -- stats/download-stats.csv)" ]; then
+            echo "No change to stats/download-stats.csv; nothing to commit"
+            exit 0
+          fi
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add stats/download-stats.csv
+          git commit -m "chore(stats): download snapshot $(date -u +%F)"
+          git push
